@@ -1,0 +1,17 @@
+---
+seq-len: 16
+lr: 0.001
+lr-decay: 2
+lr-step: 10
+early-stop: False
+num-epochs: 100000
+pc-embed-size: 64
+page-embed-size: 256
+offset-embed-size: 256000
+mha-heads: 100
+lstm-layers: 1
+lstm-units: 256
+dropout-rate: 0.2
+batch-size: 256
+weight-decay: 0.0
+rng-seed: 42
