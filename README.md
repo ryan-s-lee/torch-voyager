@@ -44,6 +44,25 @@ will be changed at a later date.
 ```
 python voyager.py -m infer -t \<trace\> -p \<saved-model\>
 ```
+
+During inference, a text file called `voyager_infer.txt` will be 
+written to containing the results of inference. The first 16 lines
+will be the 16 accesses used to make the first prediction. The
+format for these lines is: 
+```
+\<pc\>, \<accessed-address\>
+```
+
+The rest of the lines contain the actual predictions. The format
+is as follows (note that there is no program counter here; this
+may be added at a later date):
+```
+hex-counter true-address predicted-address correctness
+```
+
+the `correctness` value is `ok` if the true and predicted addresses
+match, and `no` if they are different.
+
 Other options:
 - `-s, --start-epoch`: Determines which example in the trace file to
 start reading from. The example will always be the start of an epoch

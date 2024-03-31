@@ -45,7 +45,7 @@ def infer(model, data: LargeTraceDataset, config, options) -> None:
             offset_predict = torch.argmax(offset_predict[0, -1], dim=-1)
             print(
                 f"{hex(i):7} "
-                f"{page_predict}, {offset_predict}, {page_true.item()}, {offset_true.item()}, "
+                # f"{page_predict}, {offset_predict}, {page_true.item()}, {offset_true.item()}, "
                 f"{hex((page_inverter[page_true.item()] << 12) + (offset_true.item() << 6))}, "
                 f"{hex((page_inverter[page_predict.item()] << 12) + (offset_predict.item() << 6))}",
                 "ok"
