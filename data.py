@@ -1,4 +1,6 @@
-from torch.utils.data import Dataset
+import collections
+import pickle
+from torch.utils.data import Dataset, IterableDataset
 import csv
 import numpy as np
 import torch
@@ -60,28 +62,118 @@ class SampleTraceDataset(Dataset):
                 self.page_in[index:idx_end],
                 self.offset_in[index:idx_end],
                 self.page_in[idx_end],
-                self.offset_in[idx_end]
+                self.offset_in[idx_end],
             )
 
 
 class TraceDataset(Dataset):
-    def __init__(self, trace_path: str, batch_size: int) -> None:
+    def __init__(
+        self, trace_path: str, seq_size: int, max_examples=0, offset=0
+    ) -> None:
         super().__init__()
 
+        # TODO: throw an error if max_examples < seq_size
+        assert max_examples == 0 or max_examples > seq_size
+
         self.stats = os.stat(trace_path)
-        self.batch_size = batch_size
-        self.data_arr = np.memmap(trace_path, mode="r", dtype=np.uint8, shape=(self.stats.st_size // 2, 2))
+        self.seq_size = seq_size
 
-        # TODO: Remove below line, as it is a test
-        print(self.data_arr[0])
+        assert self.stats.st_size > offset
+        assert self.stats.st_size - offset >= max_examples
+        self.max_examples = max_examples
+        self.offset = offset
 
-        self.unique_pcs = np.unique(self.data_arr[:, 0])
-        self.unique_pages = np.unique(self.data_arr[:, 1])
-        self.page_vocab_size = 0
-        self.page_vocab_size = 0
+        self.fd = open(trace_path, "rb")
+        with open("processed.pkl", "rb") as cached_dicts:
+            self.unique_pcs, self.unique_pages = pickle.load(cached_dicts)
+        self.pc_vocab_size = len(self.unique_pcs)
+        self.page_vocab_size = len(self.unique_pages)
 
     def __len__(self):
-        return self.stats.st_size / 16 / self.batch_size
+        return (
+            (self.stats.st_size // 16) - self.offset - 16
+            if self.max_examples == 0
+            else self.max_examples
+        )
 
     def __getitem__(self, index):
-        return super().__getitem__(index)
+        # if training a lot, consider using mmap, moving only a few pages at a time into memory
+        # this could avoid the overhead of making read calls.
+        # if not shuffling examples, the pages will be accessed sequentially,
+        # so consider using a try catch block to make this even faster
+        self.fd.seek((index + self.offset) * 16)
+        entries = self.fd.read(16 * (self.seq_size + 1))
+        pc_seq, page_seq, offset_seq = [], [], []
+        for i in range(0, 16 * (self.seq_size + 1), 16):
+            entry = entries[i : i + 16]
+            pc_seq.append(
+                self.unique_pcs[int.from_bytes(entry[:8], byteorder="little")]
+            )
+            addr = int.from_bytes(entry[8:], byteorder="little")
+            page_seq.append(self.unique_pages[addr >> 12])
+            offset_seq.append((addr >> 6) & 0x3F)
+        return (
+            torch.tensor(pc_seq[: self.seq_size]).cuda(),
+            torch.tensor(page_seq[: self.seq_size]).cuda(),
+            torch.tensor(offset_seq[: self.seq_size]).cuda(),
+            torch.tensor(page_seq[self.seq_size]).cuda(),
+            torch.tensor(offset_seq[self.seq_size]).cuda(),
+        )
+
+    def __del__(self):
+        self.fd.close()
+
+
+class LargeTraceDataset(IterableDataset):
+    def __init__(self, trace_path, seq_len, start_example=0) -> None:
+        super().__init__()
+        self.seq_len = seq_len
+        self.fd = open(trace_path, "rb")
+        self.fd.seek(16 * start_example, 0)
+        with open("processed.pkl", "rb") as cached_dicts:
+            self.unique_pcs, self.unique_pages = pickle.load(cached_dicts)
+        self.pc_vocab_size = len(self.unique_pcs)
+        self.page_vocab_size = len(self.unique_pages)
+
+        # the first dimension of seq tensors is the sequence number
+        # the second dimension is: 0 for pcs, 1 for page nums, and 2 for offsets.
+        self.seq = torch.empty(size=(self.seq_len + 1, 3), dtype=torch.int64)
+        for i in range(1, self.seq_len + 1):
+            entry = self.fd.read(16)
+            self.seq[i, 0] = self.unique_pcs[
+                int.from_bytes(entry[:8], byteorder="little")
+            ]
+            addr = int.from_bytes(entry[8:], byteorder="little")
+            self.seq[i, 1] = self.unique_pages[addr >> 12]
+            self.seq[i, 2] = (addr >> 6) & 0x3F
+
+        self.seq = self.seq.cuda()
+
+    def generate(self):
+        while entry := self.fd.read(16):
+            addr = int.from_bytes(entry[8:], byteorder="little")
+            self.seq = torch.cat(
+                tensors=(
+                    self.seq[1:self.seq_len+1],
+                    torch.tensor(
+                        [[
+                            self.unique_pcs[
+                                int.from_bytes(entry[:8], byteorder="little")
+                            ],
+                            self.unique_pages[addr >> 12],
+                            (addr >> 6) & 0x3F,
+                        ]]
+                    ).cuda(),
+                ),
+                dim=0,
+            )
+            yield (
+                self.seq[: self.seq_len, 0],
+                self.seq[: self.seq_len, 1],
+                self.seq[: self.seq_len, 2],
+                self.seq[self.seq_len, 1],
+                self.seq[self.seq_len, 2],
+            )
+
+    def __iter__(self):
+        return iter(self.generate())

@@ -4,10 +4,6 @@ from torch import nn
 from mha import MultiHeadedAttention
 
 
-class EmbedLayer(nn.Module):
-    pass
-
-
 class Prefetcher(nn.Module):
     def __init__(
         self,
