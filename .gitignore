@@ -121,6 +121,7 @@ celerybeat.pid
 
 # Environments
 .env
+.env.leave
 .venv
 env/
 venv/
@@ -162,3 +163,4 @@ cython_debug/
 # project-specific files
 *.ckpt
 runs
+scratch

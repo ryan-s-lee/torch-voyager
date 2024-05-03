@@ -6,6 +6,7 @@ from tqdm import tqdm
 if __name__ == "__main__":
     parser = OptionParser()
     parser.add_option("-f", "--file")
+    parser.add_option("-m", "--multilabel")
 
     opts, args = parser.parse_args()
 
@@ -14,11 +15,17 @@ if __name__ == "__main__":
     stats = os.stat(opts.file)
     with open(opts.file, "rb") as train_data:
         for _ in tqdm(range(stats.st_size // 16)):
+            # for each entry (that is, access in the trace):
+            # obtain its program counter, and page
             entry = train_data.read(16)
             pc = int.from_bytes(entry[:8], byteorder="little")
             addr = int.from_bytes(entry[8:], byteorder="little")
             page = addr >> 12
             # offset = (addr >> 6) & 0x3F
+
+            # maintain that the every program counter and page seen exists
+            # as a key in a dictionary and that its value is the order in
+            # which it was seen.
             if pc not in unique_pc:
                 unique_pc[pc] = len(unique_pc)
 

@@ -19,14 +19,13 @@ weight-decay: 0.0
 rng-seed: 42
 parallel: False
 trace: "/mnt/data/ssd/yutong_data/heaptracer_text.mcf.1135483.0000.bin"
-# trace: "stdin"
 trace-metafile: "./processed.pkl"
-trace-format: "basic"
-save-interval: 2
-outfile: "voyager.ckpt"
+trace-format: "multilabel"
+save-interval: 10
+outfile: "voyagerml.ckpt"
 warmup: 0
-loss: "globalaccess"
+loss: "multilabel"
 scheduler: "multistep" 
-infer-out: "voyager-infer.bin"
-flush-interval: 50000
+infer-out: "voyagerml-infer.bin"
+flush-interval: 250000
 online: true
