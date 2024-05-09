@@ -108,9 +108,9 @@ class TraceDataset(Dataset):
         for i in range(0, 16 * (self.seq_size + 1), 16):
             entry = entries[i : i + 16]
             pc_seq.append(
-                self.unique_pcs[int.from_bytes(entry[:8], byteorder="little")]
+                self.unique_pcs[int.from_bytes(entry[8:], byteorder="little")]
             )
-            addr = int.from_bytes(entry[8:], byteorder="little")
+            addr = int.from_bytes(entry[:8], byteorder="little")
             page_seq.append(self.unique_pages[addr >> 12])
             offset_seq.append((addr >> 6) & 0x3F)
         return (
@@ -146,9 +146,9 @@ class LargeTraceDataset(IterableDataset):
         for i in range(1, self.seq_len + 1):
             entry = self.fd.read(16)
             self.seq[i, 0] = self.unique_pcs[
-                int.from_bytes(entry[:8], byteorder="little")
+                int.from_bytes(entry[8:], byteorder="little")
             ]
-            addr = int.from_bytes(entry[8:], byteorder="little")
+            addr = int.from_bytes(entry[:8], byteorder="little")
             self.seq[i, 1] = self.unique_pages[addr >> 12]
             self.seq[i, 2] = (addr >> 6) & 0x3F
 

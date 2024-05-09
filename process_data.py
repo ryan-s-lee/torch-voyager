@@ -18,8 +18,8 @@ if __name__ == "__main__":
             # for each entry (that is, access in the trace):
             # obtain its program counter, and page
             entry = train_data.read(16)
-            pc = int.from_bytes(entry[:8], byteorder="little")
-            addr = int.from_bytes(entry[8:], byteorder="little")
+            addr = int.from_bytes(entry[:8], byteorder="little")
+            pc = int.from_bytes(entry[8:], byteorder="little")
             page = addr >> 12
             # offset = (addr >> 6) & 0x3F
 

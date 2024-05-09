@@ -204,6 +204,12 @@ class ModelWrapper:
             self.writer.flush()
             self.scheduler.step()
 
+    def train_online(self) -> None:
+        print("Training/inferring online", file=sys.stderr)
+        while (pipe_in := sys.stdin.buffer.read(520)):
+            num_addrs, path = struct.unpack("Qs", pipe_in)
+            pass
+
     def infer(self) -> None:
         print("Infering", file=sys.stderr)
         dl_iter = iter(self.dl)
