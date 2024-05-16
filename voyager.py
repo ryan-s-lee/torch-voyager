@@ -1,7 +1,7 @@
 from optparse import OptionParser
 import torch
 import yaml
-from train import ModelWrapper
+from train import OfflineModelWrapper, OnlineModelWrapper
 import sys
 
 
@@ -32,12 +32,16 @@ if __name__ == "__main__":
             exit()
     print("Config:\n", config, file=sys.stderr)
 
-    model_wrapper = ModelWrapper(config, options)
 
     if options.mode == "train":
+        model_wrapper = OfflineModelWrapper(config, options)
         model_wrapper.train()
     elif options.mode == "infer":
+        model_wrapper = OfflineModelWrapper(config, options)
         model_wrapper.infer()
+    elif options.mode == "online":
+        model_wrapper = OnlineModelWrapper(config, options)
+        model_wrapper.train()
     elif options.mode == "compile":
         sm = torch.jit.script(model_wrapper.model)
         sm.save(config["outfile"])
