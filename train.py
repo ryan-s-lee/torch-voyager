@@ -1,3 +1,4 @@
+import collections
 import sys
 import os
 import struct
@@ -136,8 +137,6 @@ class ModelWrapper:
             self.writer.add_scalar(mode + " combined accuracy", combined_accuracy)
 
 
-
-
 class OnlineModelWrapper(ModelWrapper):
     def __init__(self, config, opts) -> None:
         super().__init__(config, opts)
@@ -148,9 +147,14 @@ class OnlineModelWrapper(ModelWrapper):
         print("Training/inferring online", file=sys.stderr)
         sys_bs = sys.stdin.buffer
         epoch = 0
-        while pipe_in := sys_bs.read(32):
-            num_addrs, filename_len, num_uniq_pcs, num_uniq_pgs = struct.unpack("4Q", pipe_in)
+        files = collections.deque(maxlen=2)
+        old_pcs = None
+        old_pgs = None
 
+        while pipe_in := sys_bs.read(32):
+            num_addrs, filename_len, num_uniq_pcs, num_uniq_pgs = struct.unpack(
+                "4Q", pipe_in
+            )
             uniq_pcs = {
                 k: v
                 for k, v in [
@@ -164,14 +168,29 @@ class OnlineModelWrapper(ModelWrapper):
                 ]
             }
             path = sys_bs.read(filename_len)
-            print(f"Found {len(uniq_pgs)} pages, {len(uniq_pcs)} pcs")
-            print("Path:", path)
+            print(f"Found {len(uniq_pgs)} pages, {len(uniq_pcs)} pcs", file=sys.stderr)
+            print("Path:", path, file=sys.stderr)
+            print(f"{num_addrs} predictions to make", file=sys.stderr)
+            # store this epoch's information for retrieval in the next epoch
+            epoch_info = (path, num_addrs)
+            files.append(epoch_info)
+
+            # On the first epoch, we should not start training yet.
+            # We need to wait for the next epoch's trace file to be complete.
+            if epoch == 0:
+                epoch += 1
+                continue
+
+            # Path takes on a new meaning: it is now the previous path obtained
+            # from the pipe.
+            path, num_addrs = files.popleft()
+
+            sys.stdout.buffer.write(
+                struct.pack(f"Q{filename_len}s", filename_len, path)
+            )
 
             self.data = LargeTraceDataset(
-                path,
-                (uniq_pcs, uniq_pgs),
-                self.config["seq-len"],
-                self.device
+                path, (uniq_pcs, uniq_pgs), self.config["seq-len"], self.device
             )
             self.dl = DataLoader(self.data, batch_size=self.config["batch-size"])
             self.model = Prefetcher(
@@ -194,34 +213,101 @@ class OnlineModelWrapper(ModelWrapper):
                 self.model = nn.DataParallel(self.model)
             else:
                 print("Using only one GPU", file=sys.stderr)
-
             self.model.to(self.device)
-
-            # hyperparameters
-
             self.scheduler = self.get_scheduler(self.config, self.batch_size)
-            self.page_inverter = {v: k for k, v in self.data.unique_pgs.items()}
-
             print("created model", file=sys.stderr)
 
             # avg page loss, avg offset loss, full loss, page acc, offset acc, full acc
             train_stats = [0, 0, 0, 0, 0, 0]
-            with tqdm(total=num_addrs) as pbar:
-                for x, y in iter(self.dl):
-                    loss, train_stats = self.train_step(x, y, train_stats, num_addrs)
-                    # backpropagate
-                    self.optimizer.zero_grad()
-                    loss.backward()
-                    self.optimizer.step()
-                    if self.trained_model is not None:
-                        ins = [x[:, :, ins] for ins in (0, 1, 2)]
-                        preds = self.trained_model(ins)
+
+            with tqdm(total=num_addrs - self.config["seq-len"]) as pbar:
+                # recall that if the epoch is 0, we would not have reached
+                # this line. At epoch 1, train on the trace obtained during
+                # epoch 0.
+                if epoch == 1:
+                    for x, y in iter(self.dl):
+                        loss, train_stats = self.train_step(
+                            x, y, train_stats, num_addrs
+                        )
+                        # backpropagate
+                        self.optimizer.zero_grad()
+                        loss.backward()
+                        self.optimizer.step()
+
+                        pbar.update(len(x))
+
+                    pbar.refresh()
+                    # simulate skipping predictions
+                    zeros = b"\0" * 16 * (num_addrs - self.config["seq-len"])
+                    print(f"writing {len(zeros)} bytes worth of 0s", file=sys.stderr)
+                    sys.stdout.buffer.write(zeros)
+                else:
+                    # Make a *new* dataset over the same file, but using the old
+                    # dictionaries that the trained model used
+                    data2 = LargeTraceDataset(
+                        path, (old_pcs, old_pgs), self.config["seq-len"], self.device
+                    )
+                    dl2 = DataLoader(data2, batch_size=self.config["batch-size"])
+                    # It is possible to predict the first 16 addresses of the prediction epoch.
+                    # It is not too hard, but I haven't had the time to implement it.
+                    # To keep the predictions aligned with the sequence of accesses,
+                    # fill 16 entries with garbage/0s.
+                    # We'll risk the 16 cache misses; they shouldn't have much of an impact
+                    # at all on the final results.
+                    # sys.stdout.buffer.write(b"\0" * 16 * 16)
+                    for (x, y), (old_x, _) in zip(iter(self.dl), iter(dl2)):
+                        loss, train_stats = self.train_step(
+                            x, y, train_stats, num_addrs
+                        )
+                        # backpropagate
+                        self.optimizer.zero_grad()
+                        loss.backward()
+                        self.optimizer.step()
+
+                        # make predictions using the trained model
+                        ins = [old_x[:, :, ins] for ins in (0, 1, 2)]
+                        preds = [
+                            torch.argmax(logits[:, -1], dim=-1)
+                            for logits in self.trained_model(*ins)
+                        ]
                         self.write_prediction(preds, sys.stdout.buffer)
-                    pbar.update(len(x))
+                        pbar.update(len(x))
 
             self.print_stats(*(*train_stats, epoch, "train"))
             self.trained_model = self.model
+            old_pcs = uniq_pcs
+            old_pgs = uniq_pgs
+
+            # save this model's page inverter, so that in the upcoming epoch we
+            # can translate the model's predictions (which are small numbers)
+            # into actual pages.
+            self.page_inverter = {v: k for k, v in self.data.unique_pgs.items()}
             epoch += 1
+
+        # if more than one epoch has passed, the last epoch did not have any predictions
+        # run on its trace. Perform the predictions now.
+        if epoch == 1:
+            return
+        path, num_addrs = files.popleft()
+        sys.stdout.buffer.write(
+            struct.pack(f"Q{len(path)}s", len(path), path)
+        )
+        with tqdm(total=num_addrs - self.config["seq-len"]) as pbar:
+            data2 = LargeTraceDataset(
+                path, (old_pcs, old_pgs), self.config["seq-len"], self.device
+            )
+            dl2 = DataLoader(data2, batch_size=self.config["batch-size"])
+            for old_x, _ in iter(dl2):
+                # make predictions using the trained model
+                ins = [old_x[:, :, ins] for ins in (0, 1, 2)]
+                preds = [
+                    torch.argmax(logits[:, -1], dim=-1)
+                    for logits in self.trained_model(*ins)
+                ]
+                self.write_prediction(preds, sys.stdout.buffer)
+                pbar.update(len(old_x))
+
+        self.print_stats(*(*train_stats, epoch, "train"))
 
     def write_prediction(self, predictions, buffer):
         # TODO: remove duplicate code in infer()
@@ -282,8 +368,6 @@ class OfflineModelWrapper(ModelWrapper):
         self.page_inverter = {v: k for k, v in self.data.unique_pgs.items()}
 
         print("created model", file=sys.stderr)
-
-
 
     def train(self) -> None:
         print("Training", file=sys.stderr)

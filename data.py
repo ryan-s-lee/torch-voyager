@@ -14,7 +14,6 @@ class LargeTraceDataset(IterableDataset):
         self.fd = open(trace_path, "rb")
         self.fd.seek(16 * start_example, 0)
 
-        # TODO: Replace this with a more general format: each line is <key:int><value:int>
         self.unique_pcs, self.unique_pgs = dicts
         self.pc_vocab_size = len(self.unique_pcs)
         self.page_vocab_size = len(self.unique_pgs)
@@ -26,9 +25,10 @@ class LargeTraceDataset(IterableDataset):
         for i in range(1, self.seq_len + 1):
             entry = self.fd.read(16)
             pc, addr = struct.unpack("QQ", entry)
-            self.seq[i, 0] = self.unique_pcs[pc]
-            self.seq[i, 1] = self.unique_pgs[addr >> 12]
-            self.seq[i, 2] = (addr >> 6) & 0x3F
+            # TODO: see if doing this in-place is faster
+            self.seq[i] = torch.tensor(
+                [self.unique_pcs[pc], self.unique_pgs[addr >> 12], (addr >> 6) & 0x3F]
+            )
 
         self.seq = self.seq.to(self.device)
 
@@ -46,7 +46,7 @@ class LargeTraceDataset(IterableDataset):
             # we the programmer to split the address into page/address later.
             self.seq = torch.vstack(
                 tensors=(
-                    self.seq[1: self.seq_len + 1],
+                    self.seq[1 : self.seq_len + 1],
                     torch.tensor([[pc, page, offset]]).to(self.device),
                 ),
             )
@@ -78,7 +78,9 @@ NUM_TARGET_ADDRS = 5
 
 
 class LargeTraceWithLabels(IterableDataset):
-    def __init__(self, trace_path, trace_metafile, seq_len, device, start_example=0) -> None:
+    def __init__(
+        self, trace_path, trace_metafile, seq_len, device, start_example=0
+    ) -> None:
         super().__init__()
         self.seq_len = seq_len
         if trace_path == "stdin":
@@ -208,7 +210,11 @@ class LargeTraceWithLabels(IterableDataset):
                 yield incomplete_lines.popleft()[INC_LINE]
 
     def addr_line_to_pageoff(self, line):
-        return [self.unique_pcs[line[PC_ID]]] + [f(x) for x in line[PC_ID + 1:] for f in (lambda x: self.unique_pgs[x >> 12], lambda x: (x >> 6) & 0x3F)]
+        return [self.unique_pcs[line[PC_ID]]] + [
+            f(x)
+            for x in line[PC_ID + 1 :]
+            for f in (lambda x: self.unique_pgs[x >> 12], lambda x: (x >> 6) & 0x3F)
+        ]
 
     def generator2(self):
         seq = collections.deque()
@@ -222,7 +228,7 @@ class LargeTraceWithLabels(IterableDataset):
         for line in file_iter:
             seq.append(self.addr_line_to_pageoff(line))
             focus_block = torch.tensor(seq).to(self.device)
-            x = focus_block[:self.seq_len, :3]
+            x = focus_block[: self.seq_len, :3]
             y = focus_block[self.seq_len, 3:].reshape(5, 2)
             yield x, y
             seq.popleft()
