@@ -3,6 +3,7 @@ import torch
 import yaml
 from train import OfflineModelWrapper, OnlineModelWrapper
 import sys
+import cProfile
 
 
 # provide nice interface to interact with the voyager:
@@ -11,7 +12,7 @@ import sys
 # - run inference using a pre-existing model
 # - produce memory traces for training
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
 
 
 if __name__ == "__main__":

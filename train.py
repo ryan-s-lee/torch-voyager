@@ -11,6 +11,8 @@ from torch.utils.data import DataLoader
 from data import LargeTraceDataset, LargeTraceWithLabels
 from loss import get_loss
 from models import Prefetcher
+from cProfile import Profile
+from pstats import SortKey, Stats
 
 
 class ModelWrapper:
@@ -18,7 +20,7 @@ class ModelWrapper:
         self.config = config
         self.page_criterion = get_loss(config["loss"])
         self.offset_criterion = get_loss(config["loss"])
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device(f"cuda:{config['gpuid']}" if torch.cuda.is_available() else "cpu")
         self.num_train_batches = int(
             self.config["train-proportion"] * self.config["epoch-len"]
         )
@@ -112,13 +114,14 @@ class ModelWrapper:
         combined_correct,
         epoch,
         mode: str,
+        num_examples: int,
     ):
-        num_batches = (
-            self.num_train_batches if mode == "train" else self.num_val_batches
-        )
-        page_accuracy = page_correct / (self.batch_size * num_batches)
-        offset_accuracy = offset_correct / (self.batch_size * num_batches)
-        combined_accuracy = combined_correct / (self.batch_size * num_batches)
+        # num_batches = (
+        #     self.num_train_batches if mode == "train" else self.num_val_batches
+        # )
+        page_accuracy = page_correct / num_examples
+        offset_accuracy = offset_correct / num_examples
+        combined_accuracy = combined_correct / num_examples
 
         print(
             f"Epoch {epoch} {mode}"
@@ -152,6 +155,8 @@ class OnlineModelWrapper(ModelWrapper):
         old_pgs = None
 
         while pipe_in := sys_bs.read(32):
+            # profile = Profile()
+            # profile.enable()
             num_addrs, filename_len, num_uniq_pcs, num_uniq_pgs = struct.unpack(
                 "4Q", pipe_in
             )
@@ -189,42 +194,65 @@ class OnlineModelWrapper(ModelWrapper):
                 struct.pack(f"Q{filename_len}s", filename_len, path)
             )
 
-            self.data = LargeTraceDataset(
-                path, (uniq_pcs, uniq_pgs), self.config["seq-len"], self.device
-            )
-            self.dl = DataLoader(self.data, batch_size=self.config["batch-size"])
-            self.model = Prefetcher(
-                batch_size=self.config["batch-size"],
-                seq_len=self.config["seq-len"],
-                pc_vocab_size=self.data.pc_vocab_size,
-                page_vocab_size=self.data.page_vocab_size,
-                page_out_vocab_size=self.data.page_vocab_size,
-                pc_embed_size=64,
-                page_embed_size=256,
-            )
-            self.optimizer = torch.optim.Adam(
-                self.model.parameters(),
-                lr=self.config["lr"],
-                weight_decay=self.config["weight-decay"],
-            )
-
-            if torch.cuda.device_count() > 1 and self.config["parallel"]:
-                print(f"Using {torch.cuda.device_count()} GPUs", file=sys.stderr)
-                self.model = nn.DataParallel(self.model)
+            epoch_period_progress = epoch % self.config["predict-cycle-len"]
+            EPOCH_SKIP = 0
+            EPOCH_TRAIN_ONLY = 1
+            EPOCH_TRAIN_PRED = 2
+            EPOCH_PRED_ONLY = 3
+            if epoch_period_progress < self.config["cycle-skip"]:
+                epoch_state = EPOCH_SKIP
+                print("Skipping training/predicting this epoch", file=sys.stderr)
+            elif epoch_period_progress == self.config["cycle-skip"]:
+                epoch_state = EPOCH_TRAIN_ONLY
+                print("Training only this epoch", file=sys.stderr)
+            elif self.config["cycle-skip"] == 0 or epoch_period_progress < self.config["predict-cycle-len"] - 1:
+                epoch_state = EPOCH_TRAIN_PRED
+                print("Training and predicting this epoch", file=sys.stderr)
             else:
-                print("Using only one GPU", file=sys.stderr)
-            self.model.to(self.device)
-            self.scheduler = self.get_scheduler(self.config, self.batch_size)
-            print("created model", file=sys.stderr)
+                epoch_state = EPOCH_PRED_ONLY
+                print("Predicting only this epoch", file=sys.stderr)
+
+            if epoch_state != EPOCH_SKIP:
+                self.data = LargeTraceDataset(
+                    path, (uniq_pcs, uniq_pgs), self.config["seq-len"], self.device
+                )
+                self.dl = DataLoader(self.data, batch_size=self.config["batch-size"])
+                self.model = Prefetcher(
+                    batch_size=self.config["batch-size"],
+                    seq_len=self.config["seq-len"],
+                    pc_vocab_size=self.data.pc_vocab_size,
+                    page_vocab_size=self.data.page_vocab_size,
+                    page_out_vocab_size=self.data.page_vocab_size,
+                    pc_embed_size=64,
+                    page_embed_size=256,
+                )
+                self.optimizer = torch.optim.Adam(
+                    self.model.parameters(),
+                    lr=self.config["lr"],
+                    weight_decay=self.config["weight-decay"],
+                )
+
+                self.model.to(self.device)
+                self.scheduler = self.get_scheduler(self.config, self.batch_size)
+                print("created model", file=sys.stderr)
 
             # avg page loss, avg offset loss, full loss, page acc, offset acc, full acc
             train_stats = [0, 0, 0, 0, 0, 0]
+            num_predicted_addrs = num_addrs - self.config["seq-len"]
 
-            with tqdm(total=num_addrs - self.config["seq-len"]) as pbar:
+            with tqdm(total=num_predicted_addrs) as pbar:
                 # recall that if the epoch is 0, we would not have reached
                 # this line. At epoch 1, train on the trace obtained during
                 # epoch 0.
-                if epoch == 1:
+                if epoch_state == EPOCH_SKIP:
+                    # simulate skipping predictions
+                    # TODO: Factor: predict_zeros ->
+                    zeros = b"\0" * 16 * (num_addrs - self.config["seq-len"])
+                    print(f"writing {len(zeros)} bytes worth of 0s", file=sys.stderr)
+                    sys.stdout.buffer.write(zeros)
+                    # <- Factor
+                elif epoch_state == EPOCH_TRAIN_ONLY:
+                    # <- Factor: train_epoch
                     for x, y in iter(self.dl):
                         loss, train_stats = self.train_step(
                             x, y, train_stats, num_addrs
@@ -235,27 +263,26 @@ class OnlineModelWrapper(ModelWrapper):
                         self.optimizer.step()
 
                         pbar.update(len(x))
+                    # <- Factor
 
                     pbar.refresh()
                     # simulate skipping predictions
+                    # TODO: Factor: predict_zeros ->
                     zeros = b"\0" * 16 * (num_addrs - self.config["seq-len"])
                     print(f"writing {len(zeros)} bytes worth of 0s", file=sys.stderr)
                     sys.stdout.buffer.write(zeros)
-                else:
+                    # <- Factor
+                    # Stats(profile).strip_dirs().sort_stats(SortKey.CALLS).dump_stats("profile.stats")
+                    # print("wrote profile to profile.stats", file=sys.stderr)
+                elif epoch_state == EPOCH_TRAIN_PRED:
                     # Make a *new* dataset over the same file, but using the old
                     # dictionaries that the trained model used
                     data2 = LargeTraceDataset(
                         path, (old_pcs, old_pgs), self.config["seq-len"], self.device
                     )
                     dl2 = DataLoader(data2, batch_size=self.config["batch-size"])
-                    # It is possible to predict the first 16 addresses of the prediction epoch.
-                    # It is not too hard, but I haven't had the time to implement it.
-                    # To keep the predictions aligned with the sequence of accesses,
-                    # fill 16 entries with garbage/0s.
-                    # We'll risk the 16 cache misses; they shouldn't have much of an impact
-                    # at all on the final results.
-                    # sys.stdout.buffer.write(b"\0" * 16 * 16)
                     for (x, y), (old_x, _) in zip(iter(self.dl), iter(dl2)):
+                        # <- Factor: train_epoch
                         loss, train_stats = self.train_step(
                             x, y, train_stats, num_addrs
                         )
@@ -263,6 +290,7 @@ class OnlineModelWrapper(ModelWrapper):
                         self.optimizer.zero_grad()
                         loss.backward()
                         self.optimizer.step()
+                        # <- Factor
 
                         # make predictions using the trained model
                         ins = [old_x[:, :, ins] for ins in (0, 1, 2)]
@@ -272,16 +300,36 @@ class OnlineModelWrapper(ModelWrapper):
                         ]
                         self.write_prediction(preds, sys.stdout.buffer)
                         pbar.update(len(x))
+                    # Stats(profile).strip_dirs().sort_stats(SortKey.CALLS).dump_stats("profile.stats")
+                    # print("wrote profile to profile.stats", file=sys.stderr)
+                else:
+                    # just predict; we will be predicting zeros in the next epoch.
+                    data2 = LargeTraceDataset(
+                        path, (old_pcs, old_pgs), self.config["seq-len"], self.device
+                    )
+                    dl2 = DataLoader(data2, batch_size=self.config["batch-size"])
+                    for old_x, _ in iter(dl2):
+                        # make predictions using the trained model
+                        ins = [old_x[:, :, ins] for ins in (0, 1, 2)]
+                        preds = [
+                            torch.argmax(logits[:, -1], dim=-1)
+                            for logits in self.trained_model(*ins)
+                        ]
+                        self.write_prediction(preds, sys.stdout.buffer)
+                        pbar.update(len(old_x))
+            # profile.disable()
 
-            self.print_stats(*(*train_stats, epoch, "train"))
-            self.trained_model = self.model
-            old_pcs = uniq_pcs
-            old_pgs = uniq_pgs
+            if epoch_state in [EPOCH_TRAIN_PRED, EPOCH_TRAIN_ONLY]:
+                self.print_stats(*(*train_stats, epoch, "train", num_predicted_addrs))
+                self.trained_model = self.model
+                old_pcs = uniq_pcs
+                old_pgs = uniq_pgs
 
-            # save this model's page inverter, so that in the upcoming epoch we
-            # can translate the model's predictions (which are small numbers)
-            # into actual pages.
-            self.page_inverter = {v: k for k, v in self.data.unique_pgs.items()}
+                # save this model's page inverter, so that in the upcoming epoch we
+                # can translate the model's predictions (which are small numbers)
+                # into actual pages.
+                self.page_inverter = {v: k for k, v in self.data.unique_pgs.items()}
+
             epoch += 1
 
         # if more than one epoch has passed, the last epoch did not have any predictions
@@ -292,22 +340,27 @@ class OnlineModelWrapper(ModelWrapper):
         sys.stdout.buffer.write(
             struct.pack(f"Q{len(path)}s", len(path), path)
         )
-        with tqdm(total=num_addrs - self.config["seq-len"]) as pbar:
-            data2 = LargeTraceDataset(
-                path, (old_pcs, old_pgs), self.config["seq-len"], self.device
-            )
-            dl2 = DataLoader(data2, batch_size=self.config["batch-size"])
-            for old_x, _ in iter(dl2):
-                # make predictions using the trained model
-                ins = [old_x[:, :, ins] for ins in (0, 1, 2)]
-                preds = [
-                    torch.argmax(logits[:, -1], dim=-1)
-                    for logits in self.trained_model(*ins)
-                ]
-                self.write_prediction(preds, sys.stdout.buffer)
-                pbar.update(len(old_x))
-
-        self.print_stats(*(*train_stats, epoch, "train"))
+        if epoch_state == EPOCH_SKIP:
+            # TODO: Factor: predict_zeros ->
+            zeros = b"\0" * 16 * (num_addrs - self.config["seq-len"])
+            print(f"writing {len(zeros)} bytes worth of 0s", file=sys.stderr)
+            sys.stdout.buffer.write(zeros)
+            # <- Factor
+        else:
+            with tqdm(total=num_addrs - self.config["seq-len"]) as pbar:
+                data2 = LargeTraceDataset(
+                    path, (old_pcs, old_pgs), self.config["seq-len"], self.device
+                )
+                dl2 = DataLoader(data2, batch_size=self.config["batch-size"])
+                for old_x, _ in iter(dl2):
+                    # make predictions using the trained model
+                    ins = [old_x[:, :, ins] for ins in (0, 1, 2)]
+                    preds = [
+                        torch.argmax(logits[:, -1], dim=-1)
+                        for logits in self.trained_model(*ins)
+                    ]
+                    self.write_prediction(preds, sys.stdout.buffer)
+                    pbar.update(len(old_x))
 
     def write_prediction(self, predictions, buffer):
         # TODO: remove duplicate code in infer()
@@ -391,7 +444,7 @@ class OfflineModelWrapper(ModelWrapper):
                 loss.backward()
                 self.optimizer.step()
 
-            self.print_stats(*(*train_stats, epoch, "train"))
+            self.print_stats(*(*train_stats, epoch, "train", self.batch_size * self.num_train_batches))
 
             # evaluate on validation data
             self.model.eval()
@@ -401,7 +454,7 @@ class OfflineModelWrapper(ModelWrapper):
                 _, train_stats = self.train_step(
                     x, y, val_stats, self.num_val_batches * self.batch_size
                 )
-            self.print_stats(*(*train_stats, epoch, "val"))
+            self.print_stats(*(*train_stats, epoch, "val", self.batch_size * self.num_val_batches))
 
             if epoch % self.config["save-interval"] == self.config["save-interval"] - 1:
                 print("Saving...", file=sys.stderr)
