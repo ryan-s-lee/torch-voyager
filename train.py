@@ -48,7 +48,7 @@ class ModelWrapper:
             .clamp(max=1)
             for truth, vocab_size in (
                 (page_true, self.data.page_vocab_size),
-                (offset_true, 64),
+                (offset_true, 2 ** self.config["offset-bits"]), # TODO: Replace hard-coded offset sizes with a config
             )
         ]
         # compute loss
@@ -80,7 +80,6 @@ class ModelWrapper:
             torch.sum(offset_correct).item(),
             torch.sum(oll_korrect).item(),
         )
-        # print(num_page_correct, num_offset_correct, num_combined_correct)
         train_stats[3] += num_page_correct
         train_stats[4] += num_offset_correct
         train_stats[5] += num_combined_correct
@@ -252,7 +251,7 @@ class OnlineModelWrapper(ModelWrapper):
                     sys.stdout.buffer.write(zeros)
                     # <- Factor
                 elif epoch_state == EPOCH_TRAIN_ONLY:
-                    # <- Factor: train_epoch
+                    # TODO: Factor: train_epoch ->
                     for x, y in iter(self.dl):
                         loss, train_stats = self.train_step(
                             x, y, train_stats, num_addrs
@@ -368,8 +367,8 @@ class OnlineModelWrapper(ModelWrapper):
             pred.reshape(-1).cpu() for pred in predictions
         ]
         for page_predict, offset_predict in zip(page_predicts, offset_predicts):
-            prefetch_addr = (self.page_inverter[page_predict.item()] << 12) + (
-                offset_predict.item() << 6
+            prefetch_addr = (self.page_inverter[page_predict.item()] << self.config["line-bits"] + self.config["offset-bits"]) + (
+                offset_predict.item() << self.config["line-bits"]
             )
             buffer.write(struct.pack("QQ", 0, prefetch_addr))
 

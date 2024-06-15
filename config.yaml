@@ -31,5 +31,7 @@ infer-out: "voyager-infer.bin"
 flush-interval: 50000
 online: true
 gpuid: 0
-cycle-skip: 35
-predict-cycle-len: 40
+cycle-skip: 3
+predict-cycle-len: 6
+line-bits: 12
+offset-bits: 9

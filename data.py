@@ -27,7 +27,7 @@ class LargeTraceDataset(IterableDataset):
             pc, addr = struct.unpack("QQ", entry)
             # TODO: see if doing this in-place is faster
             self.seq[i] = torch.tensor(
-                [self.unique_pcs[pc], self.unique_pgs[addr >> 12], (addr >> 6) & 0x3F]
+                [self.unique_pcs[pc], self.unique_pgs[addr >> 21], (addr >> 12) & 0x1FF]
             )
 
         self.seq = self.seq.to(self.device)
@@ -36,8 +36,8 @@ class LargeTraceDataset(IterableDataset):
         while entry := self.fd.read(16):
             pc, addr = struct.unpack("QQ", entry)
             pc = self.unique_pcs[pc]
-            page = self.unique_pgs[addr >> 12]
-            offset = (addr >> 6) & 0x3F
+            page = self.unique_pgs[addr >> 21]
+            offset = (addr >> 12) & 0x1FF
             # seq stores the 17 most recent accesses.
             # They are represented in the numpy array as:
             # 0: pcs

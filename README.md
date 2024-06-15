@@ -1,16 +1,54 @@
 # torch-voyager
 Pytorch implementation of Voyager, for modern times.
 
-## Train
+## Online Training
 ```
-python voyager.py -m train -t \<trace\>
+python voyager.py -m online < [/path/to/pipe/from/trace] > [/path/to/output/pipe]
+
+```
+
+Voyager will read from the `pipe/from/trace` (whatever you set it to).
+The tracer will output to this pipe, and the output will consist of
+the path to the actual trace file, how many unique pcs/pgs there are,
+and a dictionary that enumerates each unique pc found as well as 
+another dictionary with a separate enumeration for each page.
+
+Voyager cycles between four states. The first, EPOCH_SKIP, indicates
+that Voyager is not training/predicting at all. This state is used to
+limit how much of the trace we are actually predicting on, which 
+is necessary to gather data in a timely manner since neural prefetching 
+is so slow. In the EPOCH_TRAIN_ONLY phase, Voyager will only train a 
+single model. This phase should last for one cycle. In the EPOCH_TRAIN_PRED phase, Voyager will use the most
+recently trained model and use it to make predictions on the current
+epoch, and it trains another fresh model. At the end of an epoch in 
+this phase, the model last used to make predictions is thrown out, and
+the newly trained model is used to predict in the next epoch. In the
+EPOCH_PRED_ONLY phase, the model doesn't train a model, and only uses
+the last-trained model to make predictions. This phase should only
+last one cycle. How many epochs it takes to cycle through all four states is
+determined by `predict-cycle-len` in config.yaml. How many epochs the skip
+phase lasts is determined by `cycle-skip`. The larger `cycle-skip` is relative
+to `predict-cycle-len`, the faster you will go through the simulation, but
+you will make predictions on less of the trace (and thus gather less information).
+
+
+To set how many bits are in the block offset, assign `line-bits` in 
+`config.yaml`. To set how many bits are in the set index, assign 
+`offset-bits` in `config.yaml` Note that these values have to be the 
+same as `LINE_BITS` and `OFFSET_BITS` assigned in the tracer's 
+`heap_tracer.h`. Play around with these to see how they affect performance,
+train/eval speed, and perhaps memory consumption.
+
+## Train (likely does not currently work)
+```
+python voyager.py -m train [TODO]
 
 ```
 
 During training, the model treats the trace file as a stream
-of examples. It will treat every 256 examples as a batch 
-(or whatever you set batch-size to in the config). It will 
-treat 200 (epoch-len) separate, consecutive batches as an epoch.
+of examples. It will treat every `batch-size` examples as a batch, 
+whatever you set it to in `config.yaml`. It will 
+treat `epoch-len` separate, consecutive batches as an epoch.
 When an epoch is finished, the training loop will NOT rerun training
 on the data in the epoch, but will instead draw new examples from the 
 trace file for use in the next epoch.

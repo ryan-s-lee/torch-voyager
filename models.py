@@ -1,4 +1,5 @@
 import torch
+import sys
 from torch import nn
 
 from mha import MultiHeadedAttention
@@ -26,7 +27,7 @@ class Prefetcher(nn.Module):
         # Initialize model members
         self.batch_size = batch_size
         self.seq_len = seq_len
-        self.offset_size = 64
+        self.offset_size = 512
         self.pc_embed_size = pc_embed_size
         self.page_embed_size = page_embed_size
         self.num_experts = num_experts
@@ -82,6 +83,7 @@ class Prefetcher(nn.Module):
         self, pc_seq: torch.Tensor, page_seq: torch.Tensor, off_seq: torch.Tensor
     ):
         # obtain pc, page, and offset embeddings
+        # print(pc_seq, file=sys.stderr)
         pc_embed_out = self.pc_embed(pc_seq)
         page_embed_out = self.page_embed(page_seq)
         off_embed_out = self.offset_embed(off_seq)
